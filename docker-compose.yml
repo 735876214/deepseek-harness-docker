@@ -1,0 +1,36 @@
+# DeepSeek Harness (dsh) —— Docker Compose 启动配置
+#
+# 用法：
+#   cp config/dsh.env.example .env   # 按需修改配置
+#   docker compose up -d
+#
+# 说明：
+#   - 镜像默认拉取 :latest（始终为最新已封装的上游版本）。
+#     也可在 .env 中把 IMAGE_TAG 固定为具体版本，例如 0.2.2-alpha.3 或 upstream-05b1cae。
+#   - 数据持久化在命名卷 dsh-data（对应容器内 /data = $DSH_HOME）。
+#   - 仅 amd64 架构。
+
+services:
+  dsh:
+    image: ghcr.io/735876214/deepseek-harness-docker:${IMAGE_TAG:-latest}
+    container_name: deepseek-harness
+    restart: unless-stopped
+    # 每次 up 都尝试拉取最新镜像，保证上游更新后一键升级
+    pull_policy: always
+    ports:
+      - "${DSH_PORT:-3080}:3080"
+    environment:
+      DSH_PROFILE: "${DSH_PROFILE:-web}"
+      # 留空 = 自动探测本容器 IP 并绑定（dsh web 拒绝 0.0.0.0 通配符，必须绑定具体接口 IP）
+      DSH_HOST: "${DSH_HOST:-}"
+      DSH_PORT: "${DSH_PORT:-3080}"
+      DSH_HOME: "/data"
+      DSH_EXTRA_ARGS: "${DSH_EXTRA_ARGS:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+    volumes:
+      - dsh-data:/data
+
+volumes:
+  dsh-data:
