@@ -7,3 +7,6 @@
 # 日志与系统文件
 *.log
 .DS_Store
+
+# 上游跟踪脚本生成的产物
+track_result.json
