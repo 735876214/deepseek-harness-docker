@@ -1,0 +1,7 @@
+# 上游版本溯源真值（由 scripts/track-upstream.sh 自动维护）
+UPSTREAM_TAG=dsh-v0.2.2-alpha.3
+UPSTREAM_VERSION=0.2.2-alpha.3
+UPSTREAM_COMMIT=05b1cae8db6e674c5685101494d4eec24652424a
+UPSTREAM_REPO=https://github.com/deepseek-ai/deepseek-harness
+NPM_VERSION=0.2.2-alpha.3
+TRACKED_AT=2026-11-03

@@ -1,0 +1,84 @@
+name: Track Upstream & Tag
+
+# 自动跟踪上游版本变化：每 6 小时检查一次，也可手动触发。
+# 仅由 schedule / workflow_dispatch 触发，避免提交自循环。
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "即使无变化也重新打标签并触发发布"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.track.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Track upstream
+        id: track
+        run: |
+          bash scripts/track-upstream.sh
+          STATUS=$(python3 -c "import json;print(json.load(open('track_result.json')).get('status'))")
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "track status: $STATUS"
+
+      - name: Update packaged version files
+        if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        run: |
+          python3 - <<'PY'
+          import json, re, datetime
+          r = json.load(open('track_result.json'))
+          ver = r['version']; tag = r['tag']; commit = r['commit']
+          npm = r.get('npm_version') or ver
+          today = datetime.date.today().isoformat()
+
+          lines = [
+              "# 上游版本溯源真值（由 scripts/track-upstream.sh 自动维护）",
+              f"UPSTREAM_TAG={tag}",
+              f"UPSTREAM_VERSION={ver}",
+              f"UPSTREAM_COMMIT={commit}",
+              "UPSTREAM_REPO=https://github.com/deepseek-ai/deepseek-harness",
+              f"NPM_VERSION={npm}",
+              f"TRACKED_AT={today}",
+          ]
+          open('UPSTREAM_VERSION', 'w').write("\n".join(lines) + "\n")
+          open('VERSION', 'w').write(ver + "\n")
+
+          df = open('Dockerfile').read()
+          df = re.sub(r'ARG DSH_VERSION=[^\n]*', 'ARG DSH_VERSION=' + ver, df, count=1)
+          open('Dockerfile', 'w').write(df)
+
+          entry = (
+              f"## {ver}\n"
+              f"- 上游 tag：`{tag}`\n"
+              f"- 上游 commit：`{commit}`\n"
+              f"- npm 版本：`{npm}`\n"
+              f"- 封装时间：{today}\n\n"
+          )
+          ch = open('CHANGELOG.md').read()
+          idx = ch.find("## ", ch.find("# Changelog"))
+          body = ch[:idx] if idx > 0 else ch
+          open('CHANGELOG.md', 'w').write(body + entry)
+          print("updated files for", ver)
+          PY
+
+      - name: Commit & tag
+        if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          ver=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
+          git add VERSION UPSTREAM_VERSION Dockerfile CHANGELOG.md
+          git commit -m "chore: track upstream $ver"
+          git tag -a "upstream/$ver" -m "Packaged deepseek-harness $ver (upstream $ver)"
+          git push origin HEAD
+          git push origin "upstream/$ver"
