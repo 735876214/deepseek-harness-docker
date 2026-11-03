@@ -38,7 +38,9 @@ jobs:
 
       - name: Update packaged version files
         id: update
-        if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        # 只在「上游确有新版本」时改写文件；force 仅用于重新打标签/重新发布，
+        # 不应重写 CHANGELOG（否则同一版本会不断追加重复条目）。
+        if: ${{ steps.track.outputs.status == 'UPDATE' }}
         run: |
           python3 - <<'PY'
           import json, re, datetime, os
