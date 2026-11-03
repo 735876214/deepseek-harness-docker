@@ -15,3 +15,4 @@
 - 上游 commit：`05b1cae8db6e674c5685101494d4eec24652424a`
 - npm 版本：`0.2.2-alpha.3`
 - 初始封装版本（Node 24 基础镜像，仅 amd64）。
+- 打包增强：内置零依赖 Node 鉴权网关（`auth-gateway.js` + `login.html`），以登录页与会话 Cookie 取代 `dsh web` 每次都要的 `?token=`，dsh 改在内部端口经 `--trusted-host` 免 token 转发。

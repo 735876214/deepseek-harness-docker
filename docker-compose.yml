@@ -21,11 +21,18 @@ services:
       - "${DSH_PORT:-3080}:3080"
     environment:
       DSH_PROFILE: "${DSH_PROFILE:-web}"
-      # 留空 = 自动探测本容器 IP 并绑定（dsh web 拒绝 0.0.0.0 通配符，必须绑定具体接口 IP）
-      DSH_HOST: "${DSH_HOST:-}"
+      # 对外暴露端口（鉴权网关监听此处）
       DSH_PORT: "${DSH_PORT:-3080}"
+      # dsh web 实际运行的内部端口（仅回环，由网关以 --trusted-host 免 token 转发）
+      DSH_DSH_PORT: "${DSH_DSH_PORT:-3081}"
       DSH_HOME: "/data"
       DSH_EXTRA_ARGS: "${DSH_EXTRA_ARGS:-}"
+      # 登录页访问口令：留空 = 容器启动随机生成并打印到日志（docker logs 查看）
+      DSH_LOGIN_PASSWORD: "${DSH_LOGIN_PASSWORD:-}"
+      # 会话签名密钥：留空 = 每次启动随机（重启后需重新登录）
+      DSH_SESSION_SECRET: "${DSH_SESSION_SECRET:-}"
+      # 在 TLS 反向代理之后运行时设为 1，给 Cookie 加 Secure 标记
+      DSH_SECURE_COOKIE: "${DSH_SECURE_COOKIE:-}"
       TZ: "${TZ:-Asia/Shanghai}"
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"

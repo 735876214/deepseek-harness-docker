@@ -21,7 +21,7 @@ function containerIP() {
 
 const host = process.env.DSH_HEALTH_HOST || containerIP();
 const port = parseInt(process.env.DSH_PORT || '3080', 10);
-const path = process.env.DSH_HEALTH_PATH || '/';
+const path = process.env.DSH_HEALTH_PATH || '/login';
 
 const req = http.get(
   { host, port, path, timeout: 8000 },

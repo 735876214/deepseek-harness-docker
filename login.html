@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepSeek Harness 登录</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #0f172a; color: #e2e8f0;
+    }
+    .card {
+      width: min(360px, 92vw); background: #1e293b; border: 1px solid #334155; border-radius: 14px;
+      padding: 28px 26px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { color: #94a3b8; font-size: 13px; margin: 0 0 18px; }
+    label { display: block; font-size: 13px; color: #cbd5e1; margin-bottom: 6px; }
+    input {
+      width: 100%; padding: 11px 12px; border-radius: 9px; border: 1px solid #475569;
+      background: #0f172a; color: #e2e8f0; font-size: 15px; outline: none;
+    }
+    input:focus { border-color: #6366f1; }
+    button {
+      margin-top: 16px; width: 100%; padding: 11px; border: 0; border-radius: 9px; cursor: pointer;
+      background: #6366f1; color: #fff; font-size: 15px; font-weight: 600;
+    }
+    button:hover { background: #4f46e5; }
+    .err { color: #f87171; font-size: 13px; margin: 0 0 12px; }
+  </style>
+</head>
+<body>
+  <form class="card" method="post" action="/login">
+    <h1>DeepSeek Harness</h1>
+    <p class="sub">请输入访问口令以继续</p>
+    <!--ERR-->
+    <label for="pw">访问口令</label>
+    <input id="pw" name="password" type="password" autofocus autocomplete="current-password" placeholder="口令">
+    <button type="submit">登录</button>
+  </form>
+</body>
+</html>

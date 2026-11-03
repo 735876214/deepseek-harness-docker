@@ -41,8 +41,11 @@ docker run -d --name deepseek-harness \
 |---|---|---|
 | `IMAGE_TAG` | `latest` | 镜像标签：`latest` / 具体版本如 `0.2.2-alpha.3` / `upstream-<commit7>`（仅 compose/.env 用） |
 | `DSH_PROFILE` | `web` | 启动的 profile（如 `web`/`sdk`/`headless`） |
-| `DSH_HOST` | 自动（容器 IP） | 监听地址。**留空则由容器自动探测自身 IP 并绑定**——`dsh web` 出于安全拒绝 `0.0.0.0` 通配符，必须绑定具体接口 IP 才能被外部访问；多网卡时也可手动填某个具体 IP |
-| `DSH_PORT` | `3080` | 监听端口 |
+| `DSH_PORT` | `3080` | **鉴权网关**对外监听端口（浏览器访问此端口） |
+| `DSH_DSH_PORT` | `3081` | `dsh web` 实际运行的内部端口（仅回环，由网关以 `--trusted-host` 免 token 转发） |
+| `DSH_LOGIN_PASSWORD` | 空（随机生成） | 登录页访问口令。**留空则容器启动随机生成并打印到日志**（`docker logs` 查看），便于首次登录 |
+| `DSH_SESSION_SECRET` | 空（随机） | 会话签名密钥。留空 = 每次启动随机（重启需重新登录）；固定后重启仍保持登录态 |
+| `DSH_SECURE_COOKIE` | 空 | 在 TLS 反向代理之后运行时设为 `1`，给登录 Cookie 加 `Secure` 标记 |
 | `DSH_HOME` | `/data` | 数据目录（持久化卷：profiles、`cordis.patch.yml`、插件） |
 | `DSH_EXTRA_ARGS` | 空 | 透传额外 `dsh` 参数，如 `--from-default-profile web` |
 | `TZ` | `Asia/Shanghai` | 容器内时区 |
@@ -53,14 +56,33 @@ docker run -d --name deepseek-harness \
 ```ini
 IMAGE_TAG=latest
 DSH_PORT=3080
+DSH_DSH_PORT=3081
 DSH_PROFILE=web
+DSH_LOGIN_PASSWORD=        # 留空=首次启动随机生成，见 docker logs
 TZ=Asia/Shanghai
 # DSH_EXTRA_ARGS=--from-default-profile web
 ```
 
-> **远程/反代访问提示**：`dsh web` 带有 `/api` 浏览器信任围栏。若从其他机器或域名访问，
-> 可能需要在 `DSH_EXTRA_ARGS` 中加入 `--trusted-host <你的主机或域名>`（可重复），
-> 例如：`DSH_EXTRA_ARGS=--trusted-host app.example.com`。
+### 登录页（免 token 访问）
+
+本镜像在 `dsh web` 前内置了一个**零依赖的鉴权网关**，用来取代每次都要从日志里抄的 `?token=…`：
+
+- 浏览器访问 `http://<主机IP>:3080/`（或任意路径）会自动跳到 `/login` 登录页；
+- 输入**访问口令**后，网关签发一个会话 Cookie，之后 30 天内免登录；
+- `dsh web` 仍在内部端口运行并自带 token 围栏。网关启动时会从 `dsh` 的日志中抓取它打印的 session token，并**透明地注入到每一个转发给 dsh 的请求**上，同时改写 dsh 返回的重定向地址（去掉 token、换回对外地址）。因此终端用户**完全无需接触那个 `?token=…`**。
+
+登录口令：
+
+- 未设置 `DSH_LOGIN_PASSWORD` 时，容器启动时随机生成一个并打印到日志：
+  ```bash
+  docker logs <容器名> | grep "login password"
+  ```
+- 生产环境建议在 `.env` 里固定 `DSH_LOGIN_PASSWORD`，并固定 `DSH_SESSION_SECRET`（否则容器重启后会话失效、且口令也会变）。
+- 退出登录访问 `/logout` 即可。
+
+> **生产环境务必加 TLS**：`dsh web` 与网关本身都只提供明文 HTTP。对外暴露时，
+> 请在前面再套一层反向代理（Caddy / Nginx）做 HTTPS，并把 `DSH_SECURE_COOKIE` 设为 `1`，
+> 让登录 Cookie 带 `Secure` 标记。网关已处理 `/api` 信任围栏，无需再给 `dsh` 配 `--trusted-host`。
 
 ---
 
@@ -112,8 +134,10 @@ docker inspect ghcr.io/735876214/deepseek-harness-docker:latest \
 deepseek-harness-docker/
 ├── Dockerfile                 # node:24-bookworm-slim (amd64) + npm -g @deepseek-ai/dsh
 ├── docker-compose.yml         # 清晰配置项 + 持久化卷 + 端口
-├── entrypoint.sh              # 启动 dsh web --no-open --host --port
-├── healthcheck.js             # Node 内置 http 健康检查
+├── entrypoint.sh              # 拉起鉴权网关（网关再启动 dsh）
+├── auth-gateway.js            # 零依赖 Node 鉴权网关：登录页 / 会话校验 / 反向代理 dsh
+├── login.html                 # 登录页
+├── healthcheck.js             # Node 内置 http 健康检查（探 /login）
 ├── config/dsh.env.example     # 全部可配置参数示例
 ├── scripts/
 │   ├── track-upstream.sh      # 上游版本跟踪（核心）
