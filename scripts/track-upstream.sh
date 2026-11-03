@@ -4,9 +4,8 @@
 # 输出：
 #   - stdout 打印一条状态行
 #   - 写入 track_result.json：
-#     {"status":"OK|PENDING|UPDATE",
-#      "current_version":..., "version":..., "tag":...,
-#      "commit":..., "npm_version":..., "published_at":...}
+#     {"status":"OK|PENDING|UPDATE","current_version":...,"version":...,
+#      "tag":...,"commit":...,"npm_version":...,"published_at":...}
 #
 # status 含义：
 #   OK      —— 已是最新已发布版本，无需动作
@@ -16,33 +15,47 @@
 # 用法：bash scripts/track-upstream.sh
 set -euo pipefail
 
-REPO="${UPSTREAM_REPO:-deepseek-ai/deepseek-harness}"
-STATE_FILE="${STATE_FILE:-UPSTREAM_VERSION}"
-OUT="${TRACK_OUT:-track_result.json}"
+export UPSTREAM_REPO="${UPSTREAM_REPO:-deepseek-ai/deepseek-harness}"
+export STATE_FILE="${STATE_FILE:-UPSTREAM_VERSION}"
+export TRACK_OUT="${TRACK_OUT:-track_result.json}"
 
-CURRENT_VERSION=""
-if [ -f "$STATE_FILE" ]; then
-  CURRENT_VERSION=$(grep '^UPSTREAM_VERSION=' "$STATE_FILE" | head -n1 | cut -d= -f2- | tr -d '"' || true)
-fi
+python3 - <<'PY'
+import sys, json, os, urllib.request
+
+repo = os.environ["UPSTREAM_REPO"]
+state = os.environ["STATE_FILE"]
+out = os.environ["TRACK_OUT"]
+
+# 当前已封装版本
+current = ""
+if os.path.exists(state):
+    for line in open(state, encoding="utf-8"):
+        if line.startswith("UPSTREAM_VERSION="):
+            current = line.split("=", 1)[1].strip().strip('"')
+
+def get_json(url):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "dsh-tracker",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    return json.load(urllib.request.urlopen(req, timeout=30))
 
 # 1) 拉取上游 tags，保留 dsh-v*，提取 (version, tag, commit)
-MAP_JSON=$(curl -fsS -m 30 -H "Accept: application/vnd.github+json" -H "User-Agent: dsh-tracker" \
-  "https://api.github.com/repos/${REPO}/tags?per_page=100" \
-  | python3 - <<'PY'
-import sys, json
-data = json.load(sys.stdin)
-out = []
-for t in data:
-    n = t.get("name", "")
-    if n.startswith("dsh-v"):
-        out.append({"tag": n, "version": n[5:], "commit": t.get("commit", {}).get("sha", "")})
-print(json.dumps(out))
-PY
-)
+try:
+    tags = get_json(f"https://api.github.com/repos/{repo}/tags?per_page=100")
+except Exception as e:
+    print(json.dumps({"status": "ERROR", "error": str(e)}))
+    sys.exit(1)
 
-# 2) 按 semver 取最新，并确认 npm 是否已发布该版本
-RESULT=$(echo "$MAP_JSON" | python3 - "$CURRENT_VERSION" <<'PY'
-import sys, json, urllib.request
+cands = [
+    {"tag": t["name"], "version": t["name"][5:], "commit": t.get("commit", {}).get("sha", "")}
+    for t in tags
+    if t.get("name", "").startswith("dsh-v")
+]
 
 def parse(v):
     v = v.strip()
@@ -60,41 +73,36 @@ def parse(v):
     # (版本号, 发布版优先于预发布, 预发布标识)
     return (nums, 0 if pre_ids else 1, pre_ids)
 
-cands = json.load(sys.stdin)
-current = sys.argv[1]
 cands.sort(key=lambda c: parse(c["version"]), reverse=True)
 best = cands[0] if cands else None
+
 if not best:
-    print(json.dumps({"status": "OK", "current_version": current}))
-    sys.exit(0)
-
-ver = best["version"]
-try:
-    req = urllib.request.Request(
-        "https://registry.npmjs.org/@deepseek-ai%2Fdsh",
-        headers={"User-Agent": "dsh-tracker"},
-    )
-    d = json.load(urllib.request.urlopen(req, timeout=30))
-    published = ver in set(d.get("versions", {}).keys())
-    npm_latest = d.get("dist-tags", {}).get("latest", "")
-except Exception:
-    published = False
-    npm_latest = ""
-
-best["npm_version"] = ver if published else ""
-best["current_version"] = current
-best["published_at"] = ""
-if not published:
-    best["status"] = "PENDING"
-    best["note"] = f"upstream {ver} not yet on npm (latest={npm_latest})"
-elif ver != current:
-    best["status"] = "UPDATE"
+    result = {"status": "OK", "current_version": current}
 else:
-    best["status"] = "OK"
-print(json.dumps(best))
-PY
-)
+    ver = best["version"]
+    # 2) 确认 npm 是否已发布该版本
+    try:
+        d = get_json("https://registry.npmjs.org/@deepseek-ai%2Fdsh")
+        published = ver in set(d.get("versions", {}).keys())
+        npm_latest = d.get("dist-tags", {}).get("latest", "")
+    except Exception:
+        published = False
+        npm_latest = ""
 
-echo "$RESULT" | tee "$OUT"
-STATUS=$(echo "$RESULT" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status'))")
-echo "TRACK_STATUS=$STATUS"
+    best["npm_version"] = ver if published else ""
+    best["current_version"] = current
+    best["published_at"] = ""
+    if not published:
+        best["status"] = "PENDING"
+        best["note"] = f"upstream {ver} not yet on npm (latest={npm_latest})"
+    elif ver != current:
+        best["status"] = "UPDATE"
+    else:
+        best["status"] = "OK"
+    result = best
+
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(result, f, indent=2)
+print(json.dumps(result, ensure_ascii=False))
+print("TRACK_STATUS=" + result.get("status", "ERROR"))
+PY
