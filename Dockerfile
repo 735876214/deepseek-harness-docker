@@ -34,5 +34,5 @@ EXPOSE 3080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
     CMD ["node", "/app/healthcheck.js"]
 
-# 入口改为鉴权网关：网关再拉起 dsh（内部端口 + --trusted-host 免 token）
+# 入口改为鉴权网关：网关再拉起 dsh（内部回环端口，token 由网关自动注入转发）
 ENTRYPOINT ["/app/entrypoint.sh"]

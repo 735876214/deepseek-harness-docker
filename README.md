@@ -42,10 +42,12 @@ docker run -d --name deepseek-harness \
 | `IMAGE_TAG` | `latest` | 镜像标签：`latest` / 具体版本如 `0.2.2-alpha.3` / `upstream-<commit7>`（仅 compose/.env 用） |
 | `DSH_PROFILE` | `web` | 启动的 profile（如 `web`/`sdk`/`headless`） |
 | `DSH_PORT` | `3080` | **鉴权网关**对外监听端口（浏览器访问此端口） |
-| `DSH_DSH_PORT` | `3081` | `dsh web` 实际运行的内部端口（仅回环，由网关以 `--trusted-host` 免 token 转发） |
+| `DSH_DSH_PORT` | `3081` | `dsh web` 实际运行的内部端口（仅回环；其 `?token=` 由网关自动抓取并注入转发） |
 | `DSH_LOGIN_PASSWORD` | 空（随机生成） | 登录页访问口令。**留空则容器启动随机生成并打印到日志**（`docker logs` 查看），便于首次登录 |
 | `DSH_SESSION_SECRET` | 空（随机） | 会话签名密钥。留空 = 每次启动随机（重启需重新登录）；固定后重启仍保持登录态 |
 | `DSH_SECURE_COOKIE` | 空 | 在 TLS 反向代理之后运行时设为 `1`，给登录 Cookie 加 `Secure` 标记 |
+| `DSH_LOGIN_MAX_FAILS` | `8` | 同一 IP 连续登录失败次数上限，超过即锁定 |
+| `DSH_LOGIN_LOCK_SECONDS` | `300` | 触发上限后的锁定时长（秒） |
 | `DSH_HOME` | `/data` | 数据目录（持久化卷：profiles、`cordis.patch.yml`、插件） |
 | `DSH_EXTRA_ARGS` | 空 | 透传额外 `dsh` 参数，如 `--from-default-profile web` |
 | `TZ` | `Asia/Shanghai` | 容器内时区 |
@@ -84,6 +86,21 @@ TZ=Asia/Shanghai
 > 请在前面再套一层反向代理（Caddy / Nginx）做 HTTPS，并把 `DSH_SECURE_COOKIE` 设为 `1`，
 > 让登录 Cookie 带 `Secure` 标记。网关已处理 `/api` 信任围栏，无需再给 `dsh` 配 `--trusted-host`。
 
+### 安全边界（网关已实现的防护）
+
+| 项目 | 行为 |
+|---|---|
+| 口令校验 | 常量时间比较，不因长度/内容泄漏时序信息 |
+| 暴力破解 | 同 IP 连续失败 `DSH_LOGIN_MAX_FAILS` 次后锁定 `DSH_LOGIN_LOCK_SECONDS` 秒，返回 `429` + `Retry-After` |
+| 会话 Cookie | `HttpOnly` + `SameSite=Lax`，签名内含时间戳，**服务端可校验过期（30 天）**，不是只靠浏览器 Max-Age |
+| 畸形输入 | Cookie 百分号编码异常、畸形 HTTP 请求、超长请求体（>4KB）均被安全处理，**不会打崩网关** |
+| 登录页 | 带 `CSP`（禁止脚本）、`X-Frame-Options: DENY`（防点击劫持）、`X-Content-Type-Options: nosniff` |
+| 日志 | 转发日志中的 `?token=` 已遮蔽为 `token=***`，避免凭据长期留在 `docker logs` |
+| 错误信息 | 上游代理失败只返回 `502`，不回显内部地址/端口 |
+
+> 注意：限速以**直连来源 IP** 计数（不信任 `X-Forwarded-For`，避免伪造绕过）。
+> 若前面套了反向代理，所有请求的来源 IP 都是代理地址，等价于全局限速——单用户场景下这符合预期。
+
 ---
 
 ## 3. 版本标识与溯源
@@ -115,12 +132,17 @@ docker inspect ghcr.io/735876214/deepseek-harness-docker:latest \
 - **`track-update.yml`**（每 6 小时 + 可手动触发）
   1. 调 GitHub API 取上游最新 `dsh-v*` tag，按 semver 取最新；
   2. 确认对应 npm 版本已发布（`@deepseek-ai/dsh`）——未发布则进入 `PENDING` 等待；
-  3. 若有新已发布版本：更新 `VERSION` / `UPSTREAM_VERSION` / `Dockerfile` ARG / `CHANGELOG.md`，提交并打 git 标签 `upstream/<version>`，推送。
+  3. 若有新已发布版本：更新 `VERSION` / `UPSTREAM_VERSION` / `Dockerfile` ARG / `CHANGELOG.md`，提交并打 git 标签 `upstream/<version>`，推送；
+  4. **紧接着显式触发 `publish.yml`**（`gh workflow run`）。这一步是必须的：GitHub 规定
+     **用 `GITHUB_TOKEN` 推送 tag 不会再触发其他工作流**，单靠 `push: tags` 指望 `publish.yml`
+     自动跑起来是行不通的（会静默断链）。
 
-- **`publish.yml`**（由 `upstream/*` 标签推送或手动触发）
+- **`publish.yml`**（由 `track-update.yml` 派发 / `upstream/*` 标签推送 / 手动触发）
   1. 读取版本与上游 commit；
   2. 用 `docker/build-push-action` 构建 `linux/amd64` 镜像；
-  3. 推送到 GHCR，标签 `latest` + 版本 + `upstream-<commit7>`，并写入溯源 OCI 标签。
+  3. 推送到 GHCR，标签 `latest` + 版本 + `upstream-<commit7>`，并写入溯源 OCI 标签；
+  4. 校验 GHCR 包可见性，若为 `private` 会输出告警（GitHub 没有改可见性的 REST 端点，
+     首次发布后如需公开请在包设置里改一次）。
 
 整个链路：上游发版 → (≤6h) 自动检测到 → 自动改文件+打标签 → 自动构建并发布镜像。你只需在 NAS 上 `docker compose pull && up -d` 即可升级。
 
