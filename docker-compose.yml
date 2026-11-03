@@ -23,7 +23,7 @@ services:
       DSH_PROFILE: "${DSH_PROFILE:-web}"
       # 对外暴露端口（鉴权网关监听此处）
       DSH_PORT: "${DSH_PORT:-3080}"
-      # dsh web 实际运行的内部端口（仅回环，由网关以 --trusted-host 免 token 转发）
+      # dsh web 实际运行的内部端口（仅回环；其 token 由网关自动抓取并注入转发）
       DSH_DSH_PORT: "${DSH_DSH_PORT:-3081}"
       DSH_HOME: "/data"
       DSH_EXTRA_ARGS: "${DSH_EXTRA_ARGS:-}"
@@ -33,6 +33,9 @@ services:
       DSH_SESSION_SECRET: "${DSH_SESSION_SECRET:-}"
       # 在 TLS 反向代理之后运行时设为 1，给 Cookie 加 Secure 标记
       DSH_SECURE_COOKIE: "${DSH_SECURE_COOKIE:-}"
+      # 登录暴力破解防护：同 IP 连续失败次数上限 / 锁定时长（秒）
+      DSH_LOGIN_MAX_FAILS: "${DSH_LOGIN_MAX_FAILS:-8}"
+      DSH_LOGIN_LOCK_SECONDS: "${DSH_LOGIN_LOCK_SECONDS:-300}"
       TZ: "${TZ:-Asia/Shanghai}"
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
