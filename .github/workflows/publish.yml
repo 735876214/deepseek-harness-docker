@@ -64,6 +64,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Packaged DeepSeek Harness (dsh) for Docker
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
             io.deepseek.upstream.repo=https://github.com/deepseek-ai/deepseek-harness
             io.deepseek.upstream.version=${{ steps.ver.outputs.version }}
             io.deepseek.upstream.commit=${{ steps.ver.outputs.commit }}

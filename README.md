@@ -111,11 +111,16 @@ TZ=Asia/Shanghai
 - `<upstream-version>`：如 `0.2.2-alpha.3`
 - `upstream-<commit7>`：对应上游 commit 短哈希，精确锁定来源
 
-溯源手段（三者一致，互相印证）：
+溯源手段（互相印证）：
 
 1. **镜像 OCI 标签**：`io.deepseek.upstream.repo` / `io.deepseek.upstream.version` / `io.deepseek.upstream.commit`
+   （上游来源），以及 `org.opencontainers.image.revision`（**构建该镜像的打包仓库提交**）
 2. **仓库文件 `UPSTREAM_VERSION`**：记录上游 tag、版本、commit、npm 版本与跟踪日期
-3. **git 标签 `upstream/<version>`**：每次发版打注解标签，指向当次更新提交
+3. **git 标签 `upstream/<version>`**：每次上游发版打注解标签，指向当次更新提交
+
+> 注意：同一上游版本「重新打包」（例如本次仅修改网关、上游未变）时，镜像的
+> `<upstream-version>` 标签会指向最新一次构建，而 git 标签 `upstream/<version>` 仍指向首次
+> 打包提交。要精确定位某镜像由哪份打包代码产出，请查看 `org.opencontainers.image.revision`。
 
 ```bash
 # 查看镜像溯源信息
