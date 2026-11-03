@@ -68,10 +68,17 @@ jobs:
             io.deepseek.upstream.version=${{ steps.ver.outputs.version }}
             io.deepseek.upstream.commit=${{ steps.ver.outputs.commit }}
 
-      - name: Ensure package is public
-        # GHCR 包默认可能为私有，显式设为公开，保证他人可 docker pull
+      - name: Verify package visibility
+        # GHCR 包首次创建时可能是 private，外部将无法 docker pull。
+        # 注意：GitHub 并没有「修改用户包可见性」的 REST 端点（PUT/PATCH .../visibility
+        # 均返回 404），因此这里只做校验并显式告警，不再假装设置成功。
+        # 若为 private，请在 包页面 → Package settings → Change visibility 一次性改为 public。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api -X PUT "user/packages/container/deepseek-harness-docker/visibility" \
-            -f visibility=public || true
+          PKG="deepseek-harness-docker"
+          VIS=$(gh api "user/packages/container/$PKG" --jq .visibility 2>/dev/null || echo unknown)
+          echo "package visibility: $VIS"
+          if [ "$VIS" = "private" ]; then
+            echo "::warning::GHCR 包 $PKG 当前为 private，外部 docker pull 会失败；请到包设置里改为 public（一次性）。"
+          fi

@@ -14,6 +14,9 @@ on:
 
 permissions:
   contents: write
+  # 需要显式触发 publish.yml：用 GITHUB_TOKEN 推送 tag 不会自动触发其他工作流，
+  # 因此这里改为主动 dispatch（见最后一步）。
+  actions: write
 
 jobs:
   track:
@@ -22,6 +25,8 @@ jobs:
       status: ${{ steps.track.outputs.status }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Track upstream
         id: track
@@ -32,10 +37,11 @@ jobs:
           echo "track status: $STATUS"
 
       - name: Update packaged version files
+        id: update
         if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
         run: |
           python3 - <<'PY'
-          import json, re, datetime
+          import json, re, datetime, os
           r = json.load(open('track_result.json'))
           ver = r['version']; tag = r['tag']; commit = r['commit']
           npm = r.get('npm_version') or ver
@@ -69,16 +75,48 @@ jobs:
           body = ch[:idx] if idx > 0 else ch
           open('CHANGELOG.md', 'w').write(body + entry)
           print("updated files for", ver)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"version={ver}\n")
           PY
 
       - name: Commit & tag
         if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        env:
+          VER: ${{ steps.update.outputs.version }}
         run: |
+          set -e
+          if [ -z "$VER" ]; then
+            VER=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
+          fi
+          echo "version under packaging: $VER"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          ver=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
           git add VERSION UPSTREAM_VERSION Dockerfile CHANGELOG.md
-          git commit -m "chore: track upstream $ver"
-          git tag -a "upstream/$ver" -m "Packaged deepseek-harness $ver (upstream $ver)"
-          git push origin HEAD
-          git push origin "upstream/$ver"
+          if git diff --cached --quiet; then
+            echo "no version file changes; skip commit"
+          else
+            git commit -m "chore: track upstream $VER"
+            git push origin HEAD
+          fi
+          # 标签可能已存在（force 重跑），已存在则跳过，避免 push 失败
+          if git ls-remote --tags origin "upstream/$VER" | grep -q .; then
+            echo "tag upstream/$VER already exists on remote; skip"
+          else
+            git tag -a "upstream/$VER" -m "Packaged deepseek-harness $VER (upstream $VER)"
+            git push origin "upstream/$VER"
+          fi
+
+      - name: Trigger image publish
+        # 关键：GITHUB_TOKEN 推送 tag 不会产生新的 workflow run，
+        # 因此必须显式 dispatch publish.yml，否则「自动发版」链条是断的。
+        if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.update.outputs.version }}
+        run: |
+          set -e
+          if [ -z "$VER" ]; then
+            VER=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
+          fi
+          echo "dispatching publish.yml with tag=$VER"
+          gh workflow run publish.yml --ref "${GITHUB_REF_NAME:-main}" -f tag="$VER"
