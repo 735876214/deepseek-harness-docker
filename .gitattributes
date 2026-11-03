@@ -1,0 +1,7 @@
+# 强制 LF 行尾：避免 Windows 克隆/编辑后 shell 脚本带 CRLF，
+# 导致在 Linux 容器里 /bin/sh 因 shebang 末尾 ^M 而启动失败。
+* text=auto eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
