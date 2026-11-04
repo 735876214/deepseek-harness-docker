@@ -6,7 +6,8 @@
 #
 # 说明：
 #   - 镜像默认拉取 :latest（始终为最新已封装的上游版本）。
-#     也可在 .env 中把 IMAGE_TAG 固定为具体版本，例如 0.2.2-alpha.3 或 upstream-05b1cae。
+#     也可在 .env 中把 IMAGE_TAG 固定为不可变打包版本，例如 0.2.2-alpha.3-r2（推荐），
+#     或上游版本 0.2.2-alpha.3（浮动别名）、upstream-05b1cae。
 #   - 数据持久化在命名卷 dsh-data（对应容器内 /data = $DSH_HOME）。
 #   - 仅 amd64 架构。
 

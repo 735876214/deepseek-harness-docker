@@ -3,7 +3,14 @@ name: Build & Publish Image
 # 构建并发布 Docker 镜像到 GHCR。
 # 触发：
 #   - 推送 upstream/* 标签（由 track-update.yml 自动产生）
-#   - 手动 workflow_dispatch（可指定 tag，用于首次发布或手动重建）
+#   - 手动 workflow_dispatch（可指定打包版本，用于首次发布或手动重建）
+#
+# 镜像标签（同一份镜像打多个标）：
+#   latest                      最新构建（浮动）
+#   <打包版本> 0.2.2-alpha.3-r2  不可变，与 git 标签 upstream/<打包版本> 一一对应
+#   <上游版本> 0.2.2-alpha.3     浮动别名，指向该上游版本的最新打包
+#   upstream-<上游commit7>       上游源码来源
+#   sha-<打包commit7>            产出该镜像的封装仓库提交
 on:
   push:
     tags:
@@ -11,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的镜像标签（默认使用当前 VERSION 文件）"
+        description: "打包版本（如 0.2.2-alpha.3-r2；留空则用 VERSION 文件）"
         required: false
         default: ""
 
@@ -28,15 +35,47 @@ jobs:
           # 打标签触发的流水线需要拉到对应提交
           ref: ${{ github.ref }}
 
-      - name: Read version & commit
+      - name: Read versions & commit
         id: ver
         run: |
-          VER="${{ github.event.inputs.tag }}"
-          if [ -z "$VER" ]; then VER=$(cat VERSION | tr -d '[:space:]'); fi
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          UP=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
+          NPM=$(grep '^NPM_VERSION=' UPSTREAM_VERSION | cut -d= -f2- || true)
+          [ -n "${NPM:-}" ] || NPM="$UP"
+          REV=$(tr -d '[:space:]' < PACKAGING_REVISION 2>/dev/null || true)
+          [ -n "${REV:-}" ] || REV=1
           COMMIT=$(grep '^UPSTREAM_COMMIT=' UPSTREAM_VERSION | cut -d= -f2-)
+          FILE_VER=$(tr -d '[:space:]' < VERSION)
+          EXPECT="${UP}-r${REV}"
+
+          # 防漂移：VERSION 必须等于 <上游版本>-r<修订号>
+          if [ "$FILE_VER" != "$EXPECT" ]; then
+            echo "::error::VERSION($FILE_VER) 与 UPSTREAM_VERSION($UP) + PACKAGING_REVISION($REV) 推导的 $EXPECT 不一致，请检查版本文件"
+            exit 1
+          fi
+
+          FULL="$EXPECT"
+          INPUT="${{ github.event.inputs.tag }}"
+          if [ -n "${INPUT:-}" ]; then
+            FULL="$INPUT"
+            STRIPPED=$(printf '%s' "$INPUT" | sed -E 's/-r[0-9]+$//')
+            INREV=$(printf '%s' "$INPUT" | sed -nE 's/.*-r([0-9]+)$/\1/p')
+            [ -n "${INREV:-}" ] && REV="$INREV"
+            if [ "$STRIPPED" != "$UP" ]; then
+              echo "::warning::指定的 $INPUT 其上游版本为 $STRIPPED，与 UPSTREAM_VERSION($UP) 不同，将按 $STRIPPED 安装 dsh"
+              NPM="$STRIPPED"
+            fi
+          fi
+
+          echo "full=$FULL" >> "$GITHUB_OUTPUT"
+          echo "upstream=$UP" >> "$GITHUB_OUTPUT"
+          echo "npm=$NPM" >> "$GITHUB_OUTPUT"
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "publishing version=$VER commit=$COMMIT"
+          echo "commit7=$(printf '%s' "$COMMIT" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "pkgsha7=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "building packaging=$FULL upstream=$UP npm=$NPM rev=r$REV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -54,21 +93,26 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          # 注意：安装的 npm 版本必须是「上游版本」，不是带 -rN 的打包版本
           build-args: |
-            DSH_VERSION=${{ steps.ver.outputs.version }}
+            DSH_VERSION=${{ steps.ver.outputs.npm }}
           tags: |
             ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ github.repository }}:upstream-${{ steps.ver.outputs.commit }}
+            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.full }}
+            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.upstream }}
+            ghcr.io/${{ github.repository }}:upstream-${{ steps.ver.outputs.commit7 }}
+            ghcr.io/${{ github.repository }}:sha-${{ steps.ver.outputs.pkgsha7 }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Packaged DeepSeek Harness (dsh) for Docker
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.full }}
             io.deepseek.upstream.repo=https://github.com/deepseek-ai/deepseek-harness
-            io.deepseek.upstream.version=${{ steps.ver.outputs.version }}
+            io.deepseek.upstream.version=${{ steps.ver.outputs.upstream }}
             io.deepseek.upstream.commit=${{ steps.ver.outputs.commit }}
+            io.deepseek.packaging.version=${{ steps.ver.outputs.full }}
+            io.deepseek.packaging.revision=r${{ steps.ver.outputs.rev }}
 
       - name: Verify package visibility
         # GHCR 包首次创建时可能是 private，外部将无法 docker pull。

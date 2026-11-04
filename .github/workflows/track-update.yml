@@ -2,13 +2,18 @@ name: Track Upstream & Tag
 
 # 自动跟踪上游版本变化：每 6 小时检查一次，也可手动触发。
 # 仅由 schedule / workflow_dispatch 触发，避免提交自循环。
+#
+# 版本模型：打包版本 = <上游版本>-r<打包修订号>（如 0.2.2-alpha.3-r2）
+#   - 上游发新版本            -> 修订号重置为 1，打 tag upstream/<上游版本>-r1
+#   - 上游未变、force 重新打包 -> 修订号 +1，打 tag upstream/<上游版本>-rN
+# 每次发版都打一次性 git 标签，与镜像的不可变标签 <打包版本> 一一对应。
 on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: "即使无变化也重新打标签并触发发布"
+        description: "即使上游无变化也递增打包修订号（rN+1）、重新打标签并触发发布"
         type: boolean
         default: false
 
@@ -23,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.track.outputs.status }}
+      packaging_version: ${{ steps.prep.outputs.packaging_version }}
+      changed: ${{ steps.prep.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,89 +43,45 @@ jobs:
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           echo "track status: $STATUS"
 
-      - name: Update packaged version files
-        id: update
-        # 只在「上游确有新版本」时改写文件；force 仅用于重新打标签/重新发布，
-        # 不应重写 CHANGELOG（否则同一版本会不断追加重复条目）。
-        if: ${{ steps.track.outputs.status == 'UPDATE' }}
-        run: |
-          python3 - <<'PY'
-          import json, re, datetime, os
-          r = json.load(open('track_result.json'))
-          ver = r['version']; tag = r['tag']; commit = r['commit']
-          npm = r.get('npm_version') or ver
-          today = datetime.date.today().isoformat()
-
-          lines = [
-              "# 上游版本溯源真值（由 scripts/track-upstream.sh 自动维护）",
-              f"UPSTREAM_TAG={tag}",
-              f"UPSTREAM_VERSION={ver}",
-              f"UPSTREAM_COMMIT={commit}",
-              "UPSTREAM_REPO=https://github.com/deepseek-ai/deepseek-harness",
-              f"NPM_VERSION={npm}",
-              f"TRACKED_AT={today}",
-          ]
-          open('UPSTREAM_VERSION', 'w').write("\n".join(lines) + "\n")
-          open('VERSION', 'w').write(ver + "\n")
-
-          df = open('Dockerfile').read()
-          df = re.sub(r'ARG DSH_VERSION=[^\n]*', 'ARG DSH_VERSION=' + ver, df, count=1)
-          open('Dockerfile', 'w').write(df)
-
-          entry = (
-              f"## {ver}\n"
-              f"- 上游 tag：`{tag}`\n"
-              f"- 上游 commit：`{commit}`\n"
-              f"- npm 版本：`{npm}`\n"
-              f"- 封装时间：{today}\n\n"
-          )
-          ch = open('CHANGELOG.md').read()
-          idx = ch.find("## ", ch.find("# Changelog"))
-          body = ch[:idx] if idx > 0 else ch
-          open('CHANGELOG.md', 'w').write(body + entry)
-          print("updated files for", ver)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"version={ver}\n")
-          PY
+      - name: Prepare packaging version
+        # 有新上游版本 -> r1；force -> rN+1；否则不动文件。
+        id: prep
+        env:
+          FORCE: ${{ inputs.force }}
+        run: python3 scripts/prepare-packaging-version.py
 
       - name: Commit & tag
-        if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        if: ${{ steps.prep.outputs.changed == 'true' }}
         env:
-          VER: ${{ steps.update.outputs.version }}
+          PKG_VER: ${{ steps.prep.outputs.packaging_version }}
         run: |
-          set -e
-          if [ -z "$VER" ]; then
-            VER=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
-          fi
-          echo "version under packaging: $VER"
+          set -euo pipefail
+          echo "packaging version: $PKG_VER"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION UPSTREAM_VERSION Dockerfile CHANGELOG.md
+          git add VERSION PACKAGING_REVISION UPSTREAM_VERSION Dockerfile CHANGELOG.md
           if git diff --cached --quiet; then
             echo "no version file changes; skip commit"
           else
-            git commit -m "chore: track upstream $VER"
+            git commit -m "chore(release): 打包 $PKG_VER"
             git push origin HEAD
           fi
-          # 标签可能已存在（force 重跑），已存在则跳过，避免 push 失败
-          if git ls-remote --tags origin "upstream/$VER" | grep -q .; then
-            echo "tag upstream/$VER already exists on remote; skip"
+          # 标签应当唯一（修订号每次递增）；若已存在（重复触发）则跳过，避免 push 失败
+          if git ls-remote --tags origin "upstream/$PKG_VER" | grep -q .; then
+            echo "tag upstream/$PKG_VER already exists on remote; skip"
           else
-            git tag -a "upstream/$VER" -m "Packaged deepseek-harness $VER (upstream $VER)"
-            git push origin "upstream/$VER"
+            git tag -a "upstream/$PKG_VER" -m "Packaged deepseek-harness $PKG_VER"
+            git push origin "upstream/$PKG_VER"
           fi
 
       - name: Trigger image publish
         # 关键：GITHUB_TOKEN 推送 tag 不会产生新的 workflow run，
         # 因此必须显式 dispatch publish.yml，否则「自动发版」链条是断的。
-        if: ${{ steps.track.outputs.status == 'UPDATE' || inputs.force }}
+        if: ${{ steps.prep.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VER: ${{ steps.update.outputs.version }}
+          PKG_VER: ${{ steps.prep.outputs.packaging_version }}
         run: |
-          set -e
-          if [ -z "$VER" ]; then
-            VER=$(grep '^UPSTREAM_VERSION=' UPSTREAM_VERSION | cut -d= -f2-)
-          fi
-          echo "dispatching publish.yml with tag=$VER"
-          gh workflow run publish.yml --ref "${GITHUB_REF_NAME:-main}" -f tag="$VER"
+          set -euo pipefail
+          echo "dispatching publish.yml with tag=$PKG_VER"
+          gh workflow run publish.yml --ref "${GITHUB_REF_NAME:-main}" -f tag="$PKG_VER"
