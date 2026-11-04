@@ -17,6 +17,13 @@
 溯源方式：镜像 OCI 标签 `io.deepseek.upstream.*` / `io.deepseek.packaging.*`、
 本目录 `UPSTREAM_VERSION` 与 `PACKAGING_REVISION`、以及 git 标签 `upstream/<打包版本>`。
 
+## 0.2.2-rc.1-r1
+- 打包版本：`0.2.2-rc.1-r1`（上游发新版本，修订号重置为 1）
+- 上游 tag：`dsh-v0.2.2-rc.1`
+- 上游 commit：`66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`
+- npm 版本：`0.2.2-rc.1`
+- 封装时间：2026-11-04
+
 ## 0.2.2-alpha.3-r2
 - 打包版本：`0.2.2-alpha.3-r2`（上游未变，重新打包）
 - 上游版本：`0.2.2-alpha.3`（commit `05b1cae8db6e674c5685101494d4eec24652424a`）
