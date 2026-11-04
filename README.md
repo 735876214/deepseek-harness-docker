@@ -39,7 +39,7 @@ docker run -d --name deepseek-harness \
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `IMAGE_TAG` | `latest` | 镜像标签：`latest` / 具体版本如 `0.2.2-alpha.3` / `upstream-<commit7>`（仅 compose/.env 用） |
+| `IMAGE_TAG` | `latest` | 镜像标签：`latest` / 不可变打包版本 `0.2.2-alpha.3-r2` / 上游版本 `0.2.2-alpha.3` / `upstream-<上游commit7>` / `sha-<打包commit7>`（仅 compose/.env 用） |
 | `DSH_PROFILE` | `web` | 启动的 profile（如 `web`/`sdk`/`headless`） |
 | `DSH_PORT` | `3080` | **鉴权网关**对外监听端口（浏览器访问此端口） |
 | `DSH_DSH_PORT` | `3081` | `dsh web` 实际运行的内部端口（仅回环；其 `?token=` 由网关自动抓取并注入转发） |
@@ -105,27 +105,56 @@ TZ=Asia/Shanghai
 
 ## 3. 版本标识与溯源
 
-每个镜像带有以下标签（在 GHCR 可见，也可 `docker inspect` 查看 OCI 标签）：
+### 版本模型
 
-- `latest`：当前最新已封装的上游版本
-- `<upstream-version>`：如 `0.2.2-alpha.3`
-- `upstream-<commit7>`：对应上游 commit 短哈希，精确锁定来源
+```
+打包版本 = <上游版本>-r<打包修订号>          例：0.2.2-alpha.3-r2
+           └ 上游 dsh 版本      └ 第几次打包该版本
 
-溯源手段（互相印证）：
+上游发新版本            → 修订号重置为 1     （0.2.2-alpha.3-r1 → 0.2.3-r1）
+上游未变、重新打包(force) → 修订号 +1         （0.2.2-alpha.3-r1 → 0.2.2-alpha.3-r2）
+```
 
-1. **镜像 OCI 标签**：`io.deepseek.upstream.repo` / `io.deepseek.upstream.version` / `io.deepseek.upstream.commit`
-   （上游来源），以及 `org.opencontainers.image.revision`（**构建该镜像的打包仓库提交**）
-2. **仓库文件 `UPSTREAM_VERSION`**：记录上游 tag、版本、commit、npm 版本与跟踪日期
-3. **git 标签 `upstream/<version>`**：每次上游发版打注解标签，指向当次更新提交
+**每个打包版本唯一且不可变**，对应一次镜像构建 + 一个 git 注解标签 `upstream/<打包版本>`，
+两者严格一一对应。真值文件：`VERSION`（打包版本）、`PACKAGING_REVISION`（修订号）、
+`UPSTREAM_VERSION`（上游 tag/commit/npm 版本）。
 
-> 注意：同一上游版本「重新打包」（例如本次仅修改网关、上游未变）时，镜像的
-> `<upstream-version>` 标签会指向最新一次构建，而 git 标签 `upstream/<version>` 仍指向首次
-> 打包提交。要精确定位某镜像由哪份打包代码产出，请查看 `org.opencontainers.image.revision`。
+### 镜像标签
+
+| 标签 | 示例 | 可变性 | 用途 |
+|---|---|---|---|
+| `latest` | `latest` | 浮动 | 始终指向最新构建，NAS 日常升级用 |
+| `<打包版本>` | `0.2.2-alpha.3-r2` | **不可变** | 精确锁定到某一次打包（可复现） |
+| `<上游版本>` | `0.2.2-alpha.3` | 浮动别名 | 该上游版本的最新打包 |
+| `upstream-<上游commit7>` | `upstream-05b1cae` | 不可变 | 上游源码来源 |
+| `sha-<打包commit7>` | `sha-9f3c1ab` | 不可变 | 产出该镜像的本仓库提交 |
+
+生产环境建议钉死不可变标签，例如：
+
+```yaml
+image: ghcr.io/735876214/deepseek-harness-docker:0.2.2-alpha.3-r2
+```
+
+### 溯源手段（互相印证）
+
+1. **镜像 OCI 标签**
+   - 上游来源：`io.deepseek.upstream.repo` / `io.deepseek.upstream.version` / `io.deepseek.upstream.commit`
+   - 打包来源：`io.deepseek.packaging.version` / `io.deepseek.packaging.revision`，
+     以及标准 `org.opencontainers.image.revision`（= 构建该镜像的打包仓库提交）
+2. **仓库文件**：`VERSION`（打包版本）、`PACKAGING_REVISION`（修订号）、
+   `UPSTREAM_VERSION`（上游 tag、版本、commit、npm 版本、跟踪日期）
+3. **git 标签 `upstream/<打包版本>`**：每次打包打一个注解标签，指向当次发布提交
 
 ```bash
 # 查看镜像溯源信息
 docker inspect ghcr.io/735876214/deepseek-harness-docker:latest \
-  | python -c "import sys,json;l=json.load(sys.stdin)[0]['Config']['Labels'];[print(k,'=',v) for k,v in l.items() if 'deepseek' in k or 'source' in k]"
+  | python -c "import sys,json;l=json.load(sys.stdin)[0]['Config']['Labels'];[print(k,'=',v) for k,v in l.items() if 'deepseek' in k or 'opencontainers' in k]"
+```
+
+校验三元组是否一致（本地）：
+
+```bash
+echo "$(cat UPSTREAM_VERSION | grep '^UPSTREAM_VERSION=' | cut -d= -f2)-r$(cat PACKAGING_REVISION)"  # 应等于 cat VERSION
 ```
 
 ---
@@ -137,17 +166,29 @@ docker inspect ghcr.io/735876214/deepseek-harness-docker:latest \
 - **`track-update.yml`**（每 6 小时 + 可手动触发）
   1. 调 GitHub API 取上游最新 `dsh-v*` tag，按 semver 取最新；
   2. 确认对应 npm 版本已发布（`@deepseek-ai/dsh`）——未发布则进入 `PENDING` 等待；
-  3. 若有新已发布版本：更新 `VERSION` / `UPSTREAM_VERSION` / `Dockerfile` ARG / `CHANGELOG.md`，提交并打 git 标签 `upstream/<version>`，推送；
-  4. **紧接着显式触发 `publish.yml`**（`gh workflow run`）。这一步是必须的：GitHub 规定
+  3. 由 `scripts/prepare-packaging-version.py` 推导打包版本：新上游版本 → 修订号重置为 `1`；
+     手动 `force` → 修订号 `+1`；两者都更新 `VERSION` / `PACKAGING_REVISION` /
+     `UPSTREAM_VERSION` / `Dockerfile` ARG / `CHANGELOG.md` 并提交；
+  4. 打 git 注解标签 `upstream/<打包版本>` 并推送；
+  5. **紧接着显式触发 `publish.yml`**（`gh workflow run`）。这一步是必须的：GitHub 规定
      **用 `GITHUB_TOKEN` 推送 tag 不会再触发其他工作流**，单靠 `push: tags` 指望 `publish.yml`
      自动跑起来是行不通的（会静默断链）。
 
 - **`publish.yml`**（由 `track-update.yml` 派发 / `upstream/*` 标签推送 / 手动触发）
-  1. 读取版本与上游 commit；
-  2. 用 `docker/build-push-action` 构建 `linux/amd64` 镜像；
-  3. 推送到 GHCR，标签 `latest` + 版本 + `upstream-<commit7>`，并写入溯源 OCI 标签；
+  1. 读取打包版本、上游版本、npm 版本与上游 commit，并**校验** `VERSION == <上游版本>-r<修订号>`
+     （不一致直接失败，防止版本文件漂移）；
+  2. 用 `docker/build-push-action` 构建 `linux/amd64` 镜像（`--build-arg DSH_VERSION=<npm 版本>`）；
+  3. 推送到 GHCR：`latest` + `<打包版本>` + `<上游版本>` + `upstream-<上游commit7>` +
+     `sha-<打包commit7>`，并写入上游/打包两类溯源 OCI 标签；
   4. 校验 GHCR 包可见性，若为 `private` 会输出告警（GitHub 没有改可见性的 REST 端点，
      首次发布后如需公开请在包设置里改一次）。
+
+**手动重新打包**（改了封装代码但上游未变时）：
+
+```bash
+# GitHub → Actions → "Track Upstream & Tag" → Run workflow → force 勾选
+# 结果：修订号 +1（如 -r1 → -r2），新 tag upstream/<打包版本>，自动触发镜像构建发布
+```
 
 整个链路：上游发版 → (≤6h) 自动检测到 → 自动改文件+打标签 → 自动构建并发布镜像。你只需在 NAS 上 `docker compose pull && up -d` 即可升级。
 
@@ -167,12 +208,13 @@ deepseek-harness-docker/
 ├── healthcheck.js             # Node 内置 http 健康检查（探 /login）
 ├── config/dsh.env.example     # 全部可配置参数示例
 ├── scripts/
-│   ├── track-upstream.sh      # 上游版本跟踪（核心）
-│   └── resolve-npm-version.sh # 解析 npm 可安装版本
+│   ├── track-upstream.sh            # 上游版本跟踪（核心）
+│   ├── prepare-packaging-version.py # 推导打包版本 <上游>-r<修订号>，落地版本文件
+│   └── resolve-npm-version.sh       # 解析 npm 可安装版本
 ├── .github/workflows/
-│   ├── track-update.yml       # 定时跟踪 + 打标签
+│   ├── track-update.yml       # 定时跟踪 + 递增修订号 + 打标签 + 触发发布
 │   └── publish.yml            # 构建并发布 GHCR 镜像
-├── VERSION / UPSTREAM_VERSION / CHANGELOG.md   # 版本与溯源
+├── VERSION / PACKAGING_REVISION / UPSTREAM_VERSION / CHANGELOG.md   # 版本与溯源
 ├── LICENSE                    # MIT（来自上游）
 └── README.md
 ```
