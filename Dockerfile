@@ -4,7 +4,7 @@
 FROM --platform=linux/amd64 node:24-bookworm-slim
 
 # 上游版本（npm 版本，不带 dsh-v 前缀）。CI 在跟踪到新版本时会改写此处。
-ARG DSH_VERSION=0.2.2-rc.1
+ARG DSH_VERSION=0.2.2-rc.2
 ENV DSH_VERSION=$DSH_VERSION
 
 # 运行时可配置参数（可在 docker-compose / .env 覆盖）
