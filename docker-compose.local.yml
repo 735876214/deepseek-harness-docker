@@ -1,0 +1,42 @@
+# 本修改版（含远程访问修复的 auth-gateway.js）本地构建 compose。
+#
+# 用途：官方 GHCR 镜像不含「Host/Origin 重写」修复，需从本仓库源码本地构建。
+# 用法：
+#   cp config/dsh.env.example .env   # 按实际情况填写，反代 HTTPS 场景 DSH_SECURE_COOKIE=1
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# 仅 amd64（按约定）。升级官方 dsh 时：修改 Dockerfile 的 DSH_VERSION（或同步官方 VERSION
+# 文件），重新 build 即可；网关改造位于 auth-gateway.js，与 dsh 版本解耦，无需改动。
+
+services:
+  dsh:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    image: deepseek-harness-docker:local
+    container_name: deepseek-harness
+    restart: unless-stopped
+    ports:
+      - "${DSH_PORT:-3080}:3080"
+    environment:
+      DSH_PROFILE: "${DSH_PROFILE:-web}"
+      DSH_PORT: "${DSH_PORT:-3080}"
+      DSH_DSH_PORT: "${DSH_DSH_PORT:-3081}"
+      DSH_HOME: "/data"
+      DSH_EXTRA_ARGS: "${DSH_EXTRA_ARGS:-}"
+      DSH_LOGIN_PASSWORD: "${DSH_LOGIN_PASSWORD:-}"
+      DSH_SESSION_SECRET: "${DSH_SESSION_SECRET:-}"
+      DSH_SECURE_COOKIE: "${DSH_SECURE_COOKIE:-}"
+      # 远程访问修复开关（默认 1，开启 Host/Origin 重写）
+      DSH_REWRITE_ORIGIN: "${DSH_REWRITE_ORIGIN:-1}"
+      DSH_LOGIN_MAX_FAILS: "${DSH_LOGIN_MAX_FAILS:-8}"
+      DSH_LOGIN_LOCK_SECONDS: "${DSH_LOGIN_LOCK_SECONDS:-300}"
+      TZ: "${TZ:-Asia/Shanghai}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+    volumes:
+      - dsh-data:/data
+
+volumes:
+  dsh-data:

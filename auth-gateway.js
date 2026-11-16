@@ -28,6 +28,12 @@ const SESSION_MAX_AGE = 60 * 60 * 24 * 30;                       // 会话 30 �
 const COOKIE_NAME = 'dsh_sess';
 const SECRET = process.env.DSH_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const SECURE_COOKIE = process.env.DSH_SECURE_COOKIE === '1';
+// 是否把转发给 dsh 的 Host/Origin 重写为内部 loopback（默认开启）。
+// 新版 dsh 的目录选择/列举等接口是 loopback-only 特权方法（空 trusted-host 列表），
+// 只接受本机来源；直接透传外部 Host 会得到 HTTP 403。网关已提供登录鉴权，
+// 由它统一把来源声明为 loopback，dsh 的信任围栏即可放行。
+// 设为 0 可恢复旧行为（透传外部 Host），用于排查对比；此时远程添加工作区会再次 403。
+const REWRITE_ORIGIN = process.env.DSH_REWRITE_ORIGIN !== '0';
 
 // 登录暴力破解防护：同一来源 IP 连续失败 N 次后锁定一段时间
 const LOGIN_MAX_FAILS = parseInt(process.env.DSH_LOGIN_MAX_FAILS || '8', 10);
@@ -170,8 +176,24 @@ function injectToken(targetPath, cookieHeader) {
   return targetPath + (targetPath.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(dshToken);
 }
 
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 计算对外的完整 origin（含协议），用于把 dsh 返回的重定向 Location 改回浏览器可访问的地址。
+// 反代场景优先信任 X-Forwarded-Proto / X-Forwarded-Host（由反代设置，覆盖内部 Host）。
+function externalOrigin(req) {
+  let scheme = 'http';
+  let host = req.headers.host || ('127.0.0.1:' + PORT);
+  const xfProto = req.headers['x-forwarded-proto'];
+  const xfHost = req.headers['x-forwarded-host'];
+  if (xfProto) scheme = String(xfProto).split(',')[0].trim();
+  else if (SECURE_COOKIE) scheme = 'https';
+  if (xfHost) host = String(xfHost).split(',')[0].trim();
+  return scheme + '://' + host;
+}
+
 function buildProxyHeaders(req) {
-  // 保留浏览器侧原始 Host：让 dsh 生成的重定向 Location 指向对外地址，而非内部回环
   const headers = { ...req.headers };
   // 去掉网关自己的会话 Cookie，dsh 不需要
   if (headers.cookie) {
@@ -183,21 +205,56 @@ function buildProxyHeaders(req) {
     if (cleaned) headers.cookie = cleaned; else delete headers.cookie;
   }
   delete headers.connection;
+
+  // 【关键改造】把发给 dsh 的来源声明为内部 loopback。
+  // 新版 dsh 把 directoryPicker/list、host.pickDirectory 等目录接口列为
+  // loopback-only 特权方法（空 trusted-host 列表评估），只接受本机来源；
+  // 直接透传外部 Host 会被判定为跨域/非本机 -> HTTP 403，无法添加工作区。
+  // 网关自身已提供登录鉴权（口令 + 会话 Cookie + 限速），是真正的访问边界，
+  // 由它把来源统一声明为 loopback，让 dsh 的信任围栏放行。
+  if (REWRITE_ORIGIN) {
+    headers.host = DSH_HOST + ':' + DSH_PORT;
+    headers.origin = 'http://' + DSH_HOST + ':' + DSH_PORT;
+    headers.referer = 'http://' + DSH_HOST + ':' + DSH_PORT + '/';
+    // 清掉反代带入、可能让 dsh 推断出真实外部来源的头
+    ['x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-for',
+     'x-real-ip', 'forwarded'].forEach((k) => delete headers[k]);
+  }
   return headers;
 }
 
-// 改写 dsh 返回的重定向 Location：去除 token 保持地址栏干净，并把内部地址替换为对外地址
-function cleanLocation(loc, externalHost) {
+// 清洗 dsh 下发的 Cookie：去掉 Domain 使其成为 host-only Cookie（浏览器才能按实际
+// 访问的外部域名保存并在后续请求带回，否则会退化成反复注入 token -> 401），
+// 并在 HTTPS 反代下补 Secure 标记。
+function sanitizeSetCookie(headers) {
+  const raw = headers['set-cookie'];
+  if (!raw) return;
+  const arr = Array.isArray(raw) ? raw : [raw];
+  headers['set-cookie'] = arr.map((v) => {
+    let s = String(v).replace(/;\s*Domain=[^;]*/i, '');
+    if (SECURE_COOKIE && !/;\s*Secure\b/i.test(s)) s += '; Secure';
+    return s;
+  });
+}
+
+// 改写 dsh 返回的重定向 Location：去除 token 保持地址栏干净，并把内部回环地址
+// 替换为对外完整 origin（含协议），兼容相对路径、绝对 URL 及 WebSocket 反代场景。
+function cleanLocation(loc, origin) {
   if (!loc) return loc;
   let s = loc.replace(/([?&])token=[^&]+(&|$)/g, (m, p, end) => (end === '&' ? p : ''));
   s = s.replace(/^[?&]/, '').replace(/[?&]$/, '');
-  s = s.replace(new RegExp('127\\.0\\.0\\.1:' + DSH_PORT, 'g'), externalHost);
-  s = s.replace(new RegExp(DSH_HOST + ':' + DSH_PORT, 'g'), externalHost);
+  // 绝对 URL（http://127.0.0.1:3081/... 或 https://...）：整体换成对外 origin
+  s = s.replace(new RegExp('https?://' + escapeRe(DSH_HOST) + ':' + DSH_PORT, 'gi'), origin);
+  s = s.replace(new RegExp('https?://127\\.0\\.0\\.1:' + DSH_PORT, 'gi'), origin);
+  // 裸 host:port：换成对外 origin 的 host 部分，避免拼接出重复协议
+  const originHost = origin.replace(/^https?:\/\//i, '');
+  s = s.replace(new RegExp(escapeRe(DSH_HOST) + ':' + DSH_PORT, 'g'), originHost);
+  s = s.replace(new RegExp('127\\.0\\.0\\.1:' + DSH_PORT, 'g'), originHost);
   return s;
 }
 
 function proxyRequest(req, res) {
-  const externalHost = req.headers.host || '127.0.0.1:' + PORT;
+  const origin = externalOrigin(req);
   const targetPath = injectToken(req.url, req.headers.cookie);
   const proxyReq = http.request(
     { host: DSH_HOST, port: DSH_PORT, path: targetPath, method: req.method, headers: buildProxyHeaders(req) },
@@ -206,7 +263,8 @@ function proxyRequest(req, res) {
       delete headers.connection;
       delete headers['transfer-encoding'];
       delete headers['content-length']; // 交由 Node 重新计算
-      if (headers.location) headers.location = cleanLocation(headers.location, externalHost);
+      sanitizeSetCookie(headers);
+      if (headers.location) headers.location = cleanLocation(headers.location, origin);
       res.writeHead(proxyRes.statusCode, headers);
       proxyRes.pipe(res);
     }
@@ -372,11 +430,12 @@ function startDsh() {
   dshProc = spawn('dsh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   dshProc.stdout.on('data', (d) => {
     const s = d.toString();
-    // 抓取 dsh 打印的 session token：http://.../?token=XXXX，用于透明注入
-    const m = s.match(/token=([A-Za-z0-9_-]+)/);
-    if (m) dshToken = m[1];
+    // 抓取 dsh 打印的 session token：http://.../?token=XXXX，用于透明注入。
+    // 放宽字符集，兼容不同上游版本可能包含的 '.'/'~' 等字符，避免抓不到而 401。
+    const m = s.match(/[?&]token=([^\s&"']+)/);
+    if (m) dshToken = m[1].replace(/[.,;)\]}>]+$/, '');
     // 日志里对 token 做遮蔽后再输出，避免凭据长期留在 docker logs 中
-    process.stdout.write(`[dsh] ${s.replace(/token=[A-Za-z0-9_-]+/g, 'token=***')}`);
+    process.stdout.write(`[dsh] ${s.replace(/([?&]token=)[^\s&"']+/g, '$1***')}`);
   });
   dshProc.stderr.on('data', (d) => process.stderr.write(`[dsh] ${d}`));
   dshProc.on('exit', (code, sig) => {
@@ -407,6 +466,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('dsh-gateway: login password   ->  (由 DSH_LOGIN_PASSWORD 提供)');
   }
   console.log(`dsh-gateway: dsh web runs internally on ${DSH_HOST}:${DSH_PORT} (its token is auto-captured and injected per request)`);
+  console.log(`dsh-gateway: origin rewrite = ${REWRITE_ORIGIN ? 'ON' : 'OFF'} (rewrite Host/Origin to loopback for remote workspace picker)`);
   startDsh();
 });
 

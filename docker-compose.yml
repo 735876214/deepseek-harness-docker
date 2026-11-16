@@ -34,6 +34,9 @@ services:
       DSH_SESSION_SECRET: "${DSH_SESSION_SECRET:-}"
       # 在 TLS 反向代理之后运行时设为 1，给 Cookie 加 Secure 标记
       DSH_SECURE_COOKIE: "${DSH_SECURE_COOKIE:-}"
+      # 【修改版网关】把转发给 dsh 的 Host/Origin 重写为 loopback，放行局域网/反代下的
+      # 目录选择接口（默认开启；1=开启，0=关闭并恢复官方透传行为）。见 README「远程访问」。
+      DSH_REWRITE_ORIGIN: "${DSH_REWRITE_ORIGIN:-1}"
       # 登录暴力破解防护：同 IP 连续失败次数上限 / 锁定时长（秒）
       DSH_LOGIN_MAX_FAILS: "${DSH_LOGIN_MAX_FAILS:-8}"
       DSH_LOGIN_LOCK_SECONDS: "${DSH_LOGIN_LOCK_SECONDS:-300}"
