@@ -17,10 +17,14 @@
 溯源方式：镜像 OCI 标签 `io.deepseek.upstream.*` / `io.deepseek.packaging.*`、
 本目录 `UPSTREAM_VERSION` 与 `PACKAGING_REVISION`、以及 git 标签 `upstream/<打包版本>`。
 
-## 本地修改（remote-origin，不改上游 dsh）
+## 0.2.2-rc.3-r2
+- 打包版本：`0.2.2-rc.3-r2`（上游未变，仅封装层网关改造，重新打包）
+- 上游版本：`0.2.2-rc.3`（commit `38a6a5c965aa99ab525161efb7cc5cf1fe62fced`）
+- 封装时间：2026-11-16
+- 说明：上游 `dsh` 本身及启动参数未改动，改造全部位于封装层 `auth-gateway.js`。
+  也可不拉镜像、直接用 `docker-compose.local.yml` 从源码本地构建。
 
-> 说明：本节为本地网关改造，尚未随官方打包流程发布到 GHCR；用 `docker-compose.local.yml`
-> 从源码构建。上游 `dsh` 本身及启动参数未改动，改造全部位于封装层 `auth-gateway.js`。
+### 网关改造（remote-origin）
 
 - **修复局域网/反代下无法添加工作区（HTTP 403）**：上游 dsh 把目录选择/列举接口列为
   loopback-only 特权方法（空 trusted-host 列表），官方网关透传外部 Host 导致
