@@ -17,6 +17,27 @@
 溯源方式：镜像 OCI 标签 `io.deepseek.upstream.*` / `io.deepseek.packaging.*`、
 本目录 `UPSTREAM_VERSION` 与 `PACKAGING_REVISION`、以及 git 标签 `upstream/<打包版本>`。
 
+## 0.2.2-rc.3-r3
+- 打包版本：`0.2.2-rc.3-r3`（上游未变，仅封装层改造，重新打包）
+- 上游版本：`0.2.2-rc.3`（commit `38a6a5c965aa99ab525161efb7cc5cf1fe62fced`）
+- 封装时间：2026-11-16
+- 说明：上游 `dsh` 本身及启动参数未改动，改造位于 `auth-gateway.js` 与 `Dockerfile`。
+
+### 修复（r3）
+
+- **修复插件安装报 `spawn pnpm ENOENT`**：基础镜像 `node:24-bookworm-slim` 不含 pnpm，
+  而 dsh 插件系统通过 `pnpm view <pkg> name version description dsh --json` 查询插件元数据。
+  Dockerfile 中全局安装固定主版本 `pnpm@10`，并保证安装失败会让构建失败（不吞错）。
+- **修复页面左下角持续“重新连接中”（WebSocket 握手失败）**：`buildProxyHeaders` 此前无条件
+  `delete headers.connection`，把 WebSocket 升级必需的 `Connection: Upgrade` / `Upgrade` 删掉，
+  dsh 收到普通 GET 回 200 而非 101。现按 `isUpgrade` 区分：upgrade 请求保留逐跳升级头并规范化，
+  普通请求则清理升级头；补足 `proxyReq.on('response')` 处理，避免上游拒绝升级时 socket 悬挂。
+- **修复反代 401 `dsh web authentication required` 死循环**：上游 dsh 每次重启更换签名 secret，
+  浏览器遗留的 `dsh-auth-<hash(authority)>` Cookie 全部失效；网关见该 Cookie 就跳过 token 注入，
+  导致永久 401（重建容器后必现）。现：登录成功及代理返回 401（且带失效 Cookie）时主动清除所有
+  `dsh-auth-*` Cookie 并重定向重新 exchange（带 `_dsh_reauth` 防循环标记）；WS 握手 401 同样清 Cookie
+  并令前端重连。
+
 ## 0.2.2-rc.3-r2
 - 打包版本：`0.2.2-rc.3-r2`（上游未变，仅封装层网关改造，重新打包）
 - 上游版本：`0.2.2-rc.3`（commit `38a6a5c965aa99ab525161efb7cc5cf1fe62fced`）
