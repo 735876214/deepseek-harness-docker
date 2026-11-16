@@ -114,6 +114,28 @@ function cookieFlags() {
   return f;
 }
 
+// dsh 的会话 Cookie 形如 dsh-auth-<sha256(authority)>，name 随 authority 变化。
+// dsh 每次重启都会更换签名 secret，浏览器里遗留的旧 Cookie 会全部失效；
+// 若网关一见 dsh-auth Cookie 就跳过 token 注入，旧 Cookie 会让请求永久 401。
+// 这里从请求头提取所有 dsh-auth-* 名称，生成清除指令（host-only，不带 Domain）。
+function dshAuthClearCookies(req) {
+  const c = req.headers && req.headers.cookie;
+  if (!c || typeof c !== 'string') return [];
+  const names = new Set();
+  for (const part of c.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (name.startsWith('dsh-auth-')) names.add(name);
+  }
+  return [...names].map((n) => `${n}=; Path=/; Max-Age=0; SameSite=Strict`);
+}
+
+function hasDshAuthCookie(req) {
+  const c = req.headers && req.headers.cookie;
+  return !!(c && /(^|;\s*)dsh-auth-/.test(c));
+}
+
 // 登录页/跳转响应统一带上基础安全响应头
 function baseHeaders(extra) {
   return Object.assign(
@@ -193,7 +215,7 @@ function externalOrigin(req) {
   return scheme + '://' + host;
 }
 
-function buildProxyHeaders(req) {
+function buildProxyHeaders(req, isUpgrade) {
   const headers = { ...req.headers };
   // 去掉网关自己的会话 Cookie，dsh 不需要
   if (headers.cookie) {
@@ -204,7 +226,22 @@ function buildProxyHeaders(req) {
       .trim();
     if (cleaned) headers.cookie = cleaned; else delete headers.cookie;
   }
-  delete headers.connection;
+
+  if (isUpgrade) {
+    // WebSocket 握手必须原样保留逐跳升级头。此前这里无条件 delete headers.connection，
+    // 导致 dsh 收到的是普通 GET 而非 upgrade，回 200 而非 101，前端一直“重新连接中”。
+    // 规范化为标准小写取值，确保上行被识别为协议升级。
+    headers.connection = 'Upgrade';
+    if (headers.upgrade) headers.upgrade = 'websocket';
+    // Sec-WebSocket-* / Origin 由 {...req.headers} 保留，供 dsh 完成握手鉴权。
+  } else {
+    delete headers.connection;
+    delete headers.upgrade;
+    // 普通请求不应把 WS 升级头带给 dsh
+    for (const k of Object.keys(headers)) {
+      if (k.startsWith('sec-websocket-')) delete headers[k];
+    }
+  }
 
   // 【关键改造】把发给 dsh 的来源声明为内部 loopback。
   // 新版 dsh 把 directoryPicker/list、host.pickDirectory 等目录接口列为
@@ -257,8 +294,27 @@ function proxyRequest(req, res) {
   const origin = externalOrigin(req);
   const targetPath = injectToken(req.url, req.headers.cookie);
   const proxyReq = http.request(
-    { host: DSH_HOST, port: DSH_PORT, path: targetPath, method: req.method, headers: buildProxyHeaders(req) },
+    { host: DSH_HOST, port: DSH_PORT, path: targetPath, method: req.method, headers: buildProxyHeaders(req, false) },
     (proxyRes) => {
+      // 自愈：dsh 每次重启会换签名 secret，浏览器遗留的旧 dsh-auth Cookie 会失效，
+      // 而网关见 Cookie 就不再注入 token，导致永久 401 “authentication required”。
+      // 检测到这种情况时清除所有 dsh-auth Cookie 并 302 回同一路径，让浏览器重新 exchange。
+      // 仅在已抓到 token 时自愈，且用 _dsh_reauth 标记防止死循环。
+      if (proxyRes.statusCode === 401 && dshToken && hasDshAuthCookie(req)) {
+        proxyRes.resume(); // 丢弃上游 401 响应体
+        const already = /[?&]_dsh_reauth=1/.test(req.url || '');
+        if (!already) {
+          console.log('dsh-gateway: dsh 401 且带有失效 dsh-auth Cookie，清除并重新鉴权');
+          const sep = req.url.includes('?') ? '&' : '?';
+          const redirect = req.url + sep + '_dsh_reauth=1';
+          res.writeHead(302, baseHeaders({
+            Location: redirect,
+            'Set-Cookie': dshAuthClearCookies(req),
+            'Cache-Control': 'no-store',
+          }));
+          return res.end();
+        }
+      }
       const headers = { ...proxyRes.headers };
       delete headers.connection;
       delete headers['transfer-encoding'];
@@ -291,7 +347,7 @@ function proxyUpgrade(req, socket) {
     port: DSH_PORT,
     path: targetPath,
     method: req.method,
-    headers: buildProxyHeaders(req),
+    headers: buildProxyHeaders(req, true), // WebSocket 握手：保留 Connection/Upgrade/Sec-WebSocket-*
   });
   proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
     socket.write(`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\n`);
@@ -305,6 +361,24 @@ function proxyUpgrade(req, socket) {
     socket.pipe(proxySocket);
     proxySocket.on('error', () => socket.destroy());
     socket.on('error', () => proxySocket.destroy());
+  });
+  // 上游未同意升级（如返回 401/200）时走 response 而非 upgrade 事件。
+  // 若不处理，socket 会一直悬挂，前端表现为始终“重新连接中”。
+  proxyReq.on('response', (proxyRes) => {
+    try {
+      if (proxyRes.statusCode === 401) {
+        // 失效 Cookie 导致的 401：关闭连接，让前端重连；同时尝试清 Cookie。
+        const clear = dshAuthClearCookies(req);
+        let head = `HTTP/1.1 302 Found\r\nLocation: /\r\nConnection: close\r\nCache-Control: no-store\r\n`;
+        for (const c of clear) head += `Set-Cookie: ${c}\r\n`;
+        head += '\r\n';
+        socket.write(head);
+      } else {
+        socket.write(`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\nConnection: close\r\n\r\n`);
+      }
+    } catch (e) { /* ignore */ }
+    proxyRes.resume();
+    socket.end();
   });
   proxyReq.on('error', () => socket.destroy());
   req.pipe(proxyReq); // 转发初始 upgrade 请求体（如有）
@@ -367,9 +441,12 @@ function handleRequest(req, res) {
         if (typeof pw === 'string' && passwordOk(pw)) {
           clearFail(ip);
           const cookie = makeSession();
+          // 同时清除浏览器里遗留的 dsh-auth Cookie：dsh 重启后旧 Cookie 已失效，
+          // 若不清除，网关会因“已有 dsh-auth Cookie”而跳过 token 注入，导致永久 401。
+          const setCookies = [`${COOKIE_NAME}=${cookie}; ${cookieFlags()}`, ...dshAuthClearCookies(req)];
           res.writeHead(302, baseHeaders({
             Location: '/',
-            'Set-Cookie': `${COOKIE_NAME}=${cookie}; ${cookieFlags()}`,
+            'Set-Cookie': setCookies,
           }));
           return res.end();
         }

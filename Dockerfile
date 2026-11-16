@@ -16,8 +16,12 @@ ENV DSH_HOME=/data \
     NODE_ENV=production
 
 # 安装官方已发布的启动器（与 `npx @deepseek-ai/dsh web` 同一产物）。
-RUN npm install -g --no-audit --no-fund "@deepseek-ai/dsh@${DSH_VERSION}" \
-    && dsh --version || true
+# 同时全局安装 pnpm：dsh 的插件系统通过 `pnpm view <pkg> ...` 查询插件元数据，
+# 基础 node:24-bookworm-slim 镜像不含 pnpm，缺失会导致安装插件时报 spawn pnpm ENOENT。
+# 固定 pnpm 主版本以保证构建可复现；pnpm view 为只读查询，跨小版本稳定。
+RUN npm install -g --no-audit --no-fund "pnpm@10" \
+    && npm install -g --no-audit --no-fund "@deepseek-ai/dsh@${DSH_VERSION}" \
+    && { echo "pnpm: $(pnpm --version)"; echo "dsh: $(dsh --version 2>&1 || echo unknown)"; }
 
 WORKDIR /app
 COPY healthcheck.js /app/healthcheck.js
