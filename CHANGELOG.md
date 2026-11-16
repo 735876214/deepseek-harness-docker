@@ -17,6 +17,23 @@
 溯源方式：镜像 OCI 标签 `io.deepseek.upstream.*` / `io.deepseek.packaging.*`、
 本目录 `UPSTREAM_VERSION` 与 `PACKAGING_REVISION`、以及 git 标签 `upstream/<打包版本>`。
 
+## 本地修改（remote-origin，不改上游 dsh）
+
+> 说明：本节为本地网关改造，尚未随官方打包流程发布到 GHCR；用 `docker-compose.local.yml`
+> 从源码构建。上游 `dsh` 本身及启动参数未改动，改造全部位于封装层 `auth-gateway.js`。
+
+- **修复局域网/反代下无法添加工作区（HTTP 403）**：上游 dsh 把目录选择/列举接口列为
+  loopback-only 特权方法（空 trusted-host 列表），官方网关透传外部 Host 导致
+  `/api/directoryPicker/list` 等返回 403。现将转发给 dsh 的 `Host`/`Origin`/`Referer`
+  统一重写为内部 loopback，并移除 `X-Forwarded-*`/`X-Real-IP`/`Forwarded`；HTTP 与
+  WebSocket upgrade 两条路径均生效。新增开关 `DSH_REWRITE_ORIGIN`（默认 `1`）。
+- **修复反代场景认证失败（401 `dsh web authentication required`）**：
+  - 重定向 `Location` 中的内部地址改为对外完整 origin（含协议，优先 `X-Forwarded-Proto`）；
+  - 清洗 dsh 下发 Cookie 的 `Domain`（改为 host-only）并在 HTTPS 下补 `Secure`；
+  - 放宽 token 抓取正则以兼容不同上游版本的 token 字符。
+- **配套更新**：`docker-compose.yml` / `config/dsh.env.example` / `README.md` 增加新开关说明与
+  远程访问、反向代理（含 WebSocket）配置示例；新增 `docker-compose.local.yml` 用于本地构建。
+
 ## 0.2.2-rc.3-r1
 - 打包版本：`0.2.2-rc.3-r1`（上游发新版本，修订号重置为 1）
 - 上游 tag：`dsh-v0.2.2-rc.3`

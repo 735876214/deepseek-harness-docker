@@ -45,7 +45,8 @@ docker run -d --name deepseek-harness \
 | `DSH_DSH_PORT` | `3081` | `dsh web` 实际运行的内部端口（仅回环；其 `?token=` 由网关自动抓取并注入转发） |
 | `DSH_LOGIN_PASSWORD` | 空（随机生成） | 登录页访问口令。**留空则容器启动随机生成并打印到日志**（`docker logs` 查看），便于首次登录 |
 | `DSH_SESSION_SECRET` | 空（随机） | 会话签名密钥。留空 = 每次启动随机（重启需重新登录）；固定后重启仍保持登录态 |
-| `DSH_SECURE_COOKIE` | 空 | 在 TLS 反向代理之后运行时设为 `1`，给登录 Cookie 加 `Secure` 标记 |
+| `DSH_SECURE_COOKIE` | 空 | 纯 HTTP（如局域网直连）留空；TLS 反代场景设为 `1` 给 Cookie 加 `Secure`。HTTPS 下必须设，否则浏览器不回传 Cookie 导致 401 |
+| `DSH_REWRITE_ORIGIN` | `1`（本修改版新增） | 把转发给 dsh 的 `Host`/`Origin` 重写为内部 loopback，放行局域网/反代下的「添加工作区」。设 `0` 恢复官方透传行为（远程添加工作区会 403）。详见第 2.1 节 |
 | `DSH_LOGIN_MAX_FAILS` | `8` | 同一 IP 连续登录失败次数上限，超过即锁定 |
 | `DSH_LOGIN_LOCK_SECONDS` | `300` | 触发上限后的锁定时长（秒） |
 | `DSH_HOME` | `/data` | 数据目录（持久化卷：profiles、`cordis.patch.yml`、插件） |
@@ -84,7 +85,8 @@ TZ=Asia/Shanghai
 
 > **生产环境务必加 TLS**：`dsh web` 与网关本身都只提供明文 HTTP。对外暴露时，
 > 请在前面再套一层反向代理（Caddy / Nginx）做 HTTPS，并把 `DSH_SECURE_COOKIE` 设为 `1`，
-> 让登录 Cookie 带 `Secure` 标记。网关已处理 `/api` 信任围栏，无需再给 `dsh` 配 `--trusted-host`。
+> 让登录 Cookie 带 `Secure` 标记。本修改版网关在转发层统一声明 loopback 来源（见 2.1），
+> **无需**再给 `dsh` 配 `--trusted-host`（该参数在新版 dsh 上本来也是空转）。
 
 ### 安全边界（网关已实现的防护）
 
@@ -100,6 +102,94 @@ TZ=Asia/Shanghai
 
 > 注意：限速以**直连来源 IP** 计数（不信任 `X-Forwarded-For`，避免伪造绕过）。
 > 若前面套了反向代理，所有请求的来源 IP 都是代理地址，等价于全局限速——单用户场景下这符合预期。
+
+### 2.1 远程访问：局域网 IP / 反向代理下添加工作区（本修改版重点）
+
+#### 背景与两个典型报错
+
+上游 `dsh` 出于安全，把「目录选择/列举」类接口（`directoryPicker/list`、`host.pickDirectory`、
+`host.listDirectory`、`workspace.create` 等）列为 **loopback-only 特权方法**——以空 trusted-host
+列表评估，**只接受来自 `127.0.0.1`/`localhost` 的请求**。官方封装网关原样透传浏览器的 Host，
+于是从局域网 IP 或反代域名访问时会出现：
+
+| 访问方式 | 报错 | 触发环节 |
+|---|---|---|
+| `http://192.168.x.x:3080/` | `client api: directoryPicker/list failed: transport failure for /api/directoryPicker/list: HTTP 403` | dsh 的 Host/Origin 来源围栏（特权接口只认 loopback） |
+| 反代 `https://域名/` | `dsh web authentication required; reopen the URL printed by dsh web` | 会话 Cookie 因 `Domain`/协议不匹配未保存，token 注入链断裂后的 401 |
+
+#### 修改版做了什么（不改动官方 dsh）
+
+仅改造 `auth-gateway.js` 的转发层，**dsh 二进制与启动参数完全不动**：
+
+1. **Host/Origin 重写**（核心，`DSH_REWRITE_ORIGIN=1`）：网关把转发给 dsh 的请求头
+   `Host`/`Origin`/`Referer` 统一改写为 `http://127.0.0.1:<DSH_DSH_PORT>`，并移除
+   `X-Forwarded-*`/`X-Real-IP`/`Forwarded`，让 dsh 的信任围栏把请求当作本机请求 → 403 消失。
+   HTTP 与 WebSocket upgrade 两条路径都生效。真正的访问控制由**网关自身的登录鉴权**承担。
+2. **对外重定向地址修正**：`Location` 中的内部回环地址改写为**对外完整 origin**（含协议），
+   协议优先取 `X-Forwarded-Proto`，其次按 `DSH_SECURE_COOKIE` 推断，避免 HTTPS 反代下跳到 http。
+3. **Cookie 清洗**：去掉 dsh 下发 Cookie 的 `Domain` 属性使其成为 host-only，浏览器按实际
+   访问的外部域名保存并带回，避免反复注入 token 导致的 401；HTTPS 下补 `Secure`。
+4. **token 抓取正则放宽**：兼容不同上游版本的 token 字符，避免抓不到导致 401。
+
+#### 部署步骤
+
+```bash
+# 1. 编辑 .env（关键三项）
+#   DSH_REWRITE_ORIGIN=1         # 默认即开启
+#   DSH_LOGIN_PASSWORD=<强口令>  # 必须固定
+#   DSH_SESSION_SECRET=<长随机串> # 必须固定，否则重启掉登录
+#   DSH_SECURE_COOKIE=1          # 反代 HTTPS 场景
+
+# 2. 用修改后的源码构建并启动（见下方「从源码构建」）
+docker compose build && docker compose up -d
+
+# 3. 看日志确认开关生效、口令与 token 正常
+docker logs -f deepseek-harness | grep -E "origin rewrite|login password|dsh-gateway"
+# 期望出现: dsh-gateway: origin rewrite = ON (...)
+
+# 4. 浏览器访问并登录，然后测试「添加工作区」是否不再 403
+```
+
+#### 反向代理关键配置（以 Nginx / lucky 等为例）
+
+反代必须正确传递 Host、协议与外部地址，否则第 2、3 项修正无法生效：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3080;          # 指向网关对外端口，不是内部 3081
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-Proto $scheme;   # HTTPS 反代时为 https
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+    # WebSocket 转发（dsh 的流式 RPC 依赖 upgrade）
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;                    # 长连接不要过早断开
+    proxy_buffering off;
+}
+```
+
+检查清单：反代目标端口 = `DSH_PORT`（默认 3080）；`X-Forwarded-Proto=https`；WebSocket
+的 `Upgrade`/`Connection` 头已透传；`DSH_SECURE_COOKIE=1`；口令与会话密钥已固定。
+
+#### 从源码构建（本修改版）
+
+GHCR 上的官方镜像**不含本修改**。本修改版需从仓库源码本地构建（仅 amd64）。
+仓库已提供 `docker-compose.local.yml`（带 `build` 段），一条命令完成构建与启动：
+
+```bash
+cp config/dsh.env.example .env    # 按实际情况填写
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+该 compose 会本地构建 `auth-gateway.js` 修改后的镜像（标签 `deepseek-harness-docker:local`），
+不包含 `pull_policy: always`，避免启动时把本地镜像覆盖回官方镜像。升级官方 dsh 时同步
+`Dockerfile` 里的 `DSH_VERSION` 后重新 `--build` 即可，网关改造与 dsh 版本解耦。
+
+> 安全说明：来源重写意味着「能通过网关登录的人即拥有本机特权接口权限」。务必设置强口令、
+> 固定会话密钥，并仅在可信范围暴露；网关已实现口令校验、限速、会话过期等防护作为边界。
 
 ---
 
